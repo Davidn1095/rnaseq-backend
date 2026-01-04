@@ -1,6 +1,7 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-pandas==2.2.2
-numpy==2.0.1
-scikit-learn==1.5.1
+# requirements.txt
+fastapi
+uvicorn[standard]
+python-multipart
+pandas
+numpy
+scikit-learn
