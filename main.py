@@ -233,24 +233,54 @@ def _ensure_train(r: RunArtifacts, n_batches: int = 1) -> Dict[str, Any]:
 
     emb = _ensure_harmony(r, n_batches=n_batches)  # cells x PCs
     y = _ensure_clusters(r, k=6, n_batches=n_batches).values
-
     X = emb.values
-    # Simple CV to prove "end-to-end"
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
 
-    accs = []
-    f1s = []
+    classes, counts = np.unique(y, return_counts=True)
+    if len(classes) < 2:
+        metrics = {
+            "cv_folds": 0,
+            "accuracy_mean": 1.0,
+            "accuracy_sd": 0.0,
+            "macro_f1_mean": 1.0,
+            "macro_f1_sd": 0.0,
+            "note": "Only one cluster present, training is trivial.",
+        }
+        r.train_metrics = metrics
+        return metrics
+
+    min_count = int(counts.min())
+    n_splits = int(min(5, min_count))
+
+    # If too few samples per class for CV, fit once on full data and report in-sample metrics.
+    if n_splits < 2:
+        clf = LogisticRegression(max_iter=2000, multi_class="auto")
+        clf.fit(X, y)
+        pred = clf.predict(X)
+        metrics = {
+            "cv_folds": 0,
+            "accuracy_mean": float(accuracy_score(y, pred)),
+            "accuracy_sd": 0.0,
+            "macro_f1_mean": float(f1_score(y, pred, average="macro")),
+            "macro_f1_sd": 0.0,
+            "note": f"CV skipped because smallest cluster has {min_count} samples. Reported metrics are in-sample.",
+        }
+        r.train_metrics = metrics
+        return metrics
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    accs: list[float] = []
+    f1s: list[float] = []
 
     for tr, te in skf.split(X, y):
         clf = LogisticRegression(max_iter=2000, multi_class="auto")
         clf.fit(X[tr], y[tr])
         pred = clf.predict(X[te])
-
         accs.append(accuracy_score(y[te], pred))
         f1s.append(f1_score(y[te], pred, average="macro"))
 
     metrics = {
-        "cv_folds": 5,
+        "cv_folds": int(n_splits),
         "accuracy_mean": float(np.mean(accs)),
         "accuracy_sd": float(np.std(accs, ddof=1)) if len(accs) > 1 else 0.0,
         "macro_f1_mean": float(np.mean(f1s)),
@@ -259,6 +289,7 @@ def _ensure_train(r: RunArtifacts, n_batches: int = 1) -> Dict[str, Any]:
     }
     r.train_metrics = metrics
     return metrics
+
 
 
 async def _extract_run_id_from_request(request: Request) -> Tuple[Optional[str], Dict[str, Any]]:
