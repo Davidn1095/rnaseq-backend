@@ -1,24 +1,25 @@
+# main.py
 import io
 import json
-import uuid
+import math
 import zipfile
-from typing import Dict, Optional, Tuple, Any, List
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
 
 
-app = FastAPI(title="RNA-seq preprocessing API", version="0.2.0")
+app = FastAPI(title="RNA-seq preprocessing API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,130 +30,72 @@ app.add_middleware(
 )
 
 
-# -------------------------
-# In-memory run store
-# -------------------------
-RUNS: Dict[str, Dict[str, Any]] = {}
+@dataclass
+class RunState:
+    filename: str
+    raw_counts: pd.DataFrame
+    qc: Optional[Dict[str, Any]] = None
+    norm_log1p_cpm: Optional[pd.DataFrame] = None
+    norm_z: Optional[pd.DataFrame] = None
+    pca_scores: Optional[pd.DataFrame] = None
+    harmony_scores: Optional[pd.DataFrame] = None
+    clusters: Optional[pd.Series] = None
+    train_metrics: Optional[Dict[str, Any]] = None
 
 
-def _new_run_id() -> str:
-    return uuid.uuid4().hex
+RUNS: Dict[str, RunState] = {}
 
 
-def _infer_sep(filename: str, raw_bytes: bytes) -> str:
-    fn = filename.lower()
-    if fn.endswith(".tsv") or fn.endswith(".txt"):
-        return "\t"
-    head = raw_bytes[:4096].decode("utf-8", errors="ignore")
-    if "\t" in head and head.count("\t") > head.count(","):
-        return "\t"
-    return ","
+def _read_counts(upload: UploadFile) -> pd.DataFrame:
+    name = (upload.filename or "").lower()
+    if not (name.endswith(".csv") or name.endswith(".tsv") or name.endswith(".txt")):
+        raise HTTPException(status_code=400, detail="Upload a .csv or .tsv count matrix")
 
+    raw = upload.file.read()
+    if raw is None:
+        raise HTTPException(status_code=400, detail="Empty upload")
 
-def _read_counts_matrix(file: UploadFile, raw: bytes) -> pd.DataFrame:
-    if not file.filename.lower().endswith((".csv", ".tsv", ".txt")):
-        raise HTTPException(status_code=400, detail="Upload a .csv, .tsv, or .txt count matrix")
-
-    sep = _infer_sep(file.filename, raw)
-
+    sep = "\t" if name.endswith(".tsv") or name.endswith(".txt") else ","
     try:
         df = pd.read_csv(io.BytesIO(raw), sep=sep, index_col=0)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot read matrix: {e}")
 
     if df.shape[0] == 0 or df.shape[1] == 0:
-        raise HTTPException(status_code=400, detail="Matrix is empty")
+        raise HTTPException(status_code=400, detail="Matrix has zero rows or columns")
 
     df = df.apply(pd.to_numeric, errors="coerce")
-
     if df.isna().all().all():
         raise HTTPException(status_code=400, detail="All values are non-numeric after coercion")
 
-    df = df.fillna(0)
+    df = df.fillna(0.0)
 
-    if (df < 0).any().any():
-        raise HTTPException(status_code=400, detail="Counts matrix contains negative values")
+    # keep gene and cell names as strings
+    df.index = df.index.astype(str)
+    df.columns = df.columns.astype(str)
 
     return df
 
 
-def _five_number(x: pd.Series) -> Dict[str, float]:
-    q = x.quantile([0.25, 0.5, 0.75]).to_dict()
+def _quantiles(x: pd.Series) -> Dict[str, float]:
+    x = pd.to_numeric(x, errors="coerce").dropna()
+    if x.empty:
+        return {"min": float("nan"), "p25": float("nan"), "p50": float("nan"), "p75": float("nan"), "max": float("nan")}
+    q = x.quantile([0.25, 0.5, 0.75])
     return {
         "min": float(x.min()),
-        "p25": float(q.get(0.25, np.nan)),
-        "p50": float(q.get(0.5, np.nan)),
-        "p75": float(q.get(0.75, np.nan)),
+        "p25": float(q.loc[0.25]),
+        "p50": float(q.loc[0.5]),
+        "p75": float(q.loc[0.75]),
         "max": float(x.max()),
     }
 
 
-def _get_run_or_400(run_id: str) -> Dict[str, Any]:
-    if run_id not in RUNS:
-        raise HTTPException(status_code=404, detail=f"Unknown run_id: {run_id}")
-    return RUNS[run_id]
-
-
-def _ensure_normalized(run: Dict[str, Any]) -> None:
-    if "normalized_log1p" in run and "pcs" in run:
-        return
-
-    counts: pd.DataFrame = run.get("counts")
-    if counts is None:
-        raise HTTPException(status_code=400, detail="Run has no counts stored")
-
-    libsize = counts.sum(axis=0)
-    libsize_safe = libsize.replace(0, np.nan)
-
-    norm = counts.div(libsize_safe, axis=1) * 1e4
-    log1p = np.log1p(norm).replace([np.inf, -np.inf], 0).fillna(0)
-
-    # PCA expects cells as rows, genes as cols
-    X = log1p.T.values
-    Xs = StandardScaler(with_mean=True, with_std=True).fit_transform(X)
-
-    n_cells, n_genes = Xs.shape
-    n_comp = int(min(30, max(2, n_cells - 1), n_genes))
-    pca = PCA(n_components=n_comp, random_state=0)
-    pcs = pca.fit_transform(Xs)
-
-    run["libsize"] = libsize.to_dict()
-    run["normalized_log1p"] = log1p
-    run["pca_var_ratio"] = pca.explained_variance_ratio_.tolist()
-    run["pcs"] = pd.DataFrame(pcs, index=log1p.columns, columns=[f"PC{i+1}" for i in range(n_comp)])
-
-
-def _default_batches(cell_names: List[str]) -> List[str]:
-    # Heuristic: batch is prefix before first underscore, else "batch1"
-    out = []
-    for c in cell_names:
-        if "_" in c:
-            out.append(c.split("_", 1)[0])
-        else:
-            out.append("batch1")
-    return out
-
-
-def _batch_center_pcs(pcs: pd.DataFrame, batches: List[str]) -> pd.DataFrame:
-    # Simple batch correction in PC space:
-    # corrected = pcs - mean(batch) + mean(global)
-    if len(batches) != pcs.shape[0]:
-        raise HTTPException(status_code=400, detail="batches length must match number of cells")
-
-    df = pcs.copy()
-    df["__batch"] = batches
-
-    global_mean = df.drop(columns="__batch").mean(axis=0)
-
-    corrected = []
-    for b, sub in df.groupby("__batch"):
-        sub_pcs = sub.drop(columns="__batch")
-        sub_mean = sub_pcs.mean(axis=0)
-        corrected.append(sub_pcs - sub_mean + global_mean)
-
-    out = pd.concat(corrected, axis=0).loc[pcs.index]
-    out.columns = pcs.columns
-    return out
+def _require_run(run_id: str) -> RunState:
+    st = RUNS.get(run_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
+    return st
 
 
 @app.get("/health")
@@ -161,16 +104,10 @@ def health():
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    raw = await file.read()
-    df = _read_counts_matrix(file, raw)
-
-    run_id = _new_run_id()
-    RUNS[run_id] = {
-        "filename": file.filename,
-        "counts": df,
-    }
-
+async def upload_counts(file: UploadFile = File(...)):
+    df = _read_counts(file)
+    run_id = uuid4().hex
+    RUNS[run_id] = RunState(filename=file.filename or "counts", raw_counts=df)
     return {
         "ok": True,
         "run_id": run_id,
@@ -180,248 +117,248 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.post("/qc")
-async def qc(
+async def qc_counts(
     file: Optional[UploadFile] = File(None),
     run_id: Optional[str] = Form(None),
 ):
-    if run_id and run_id in RUNS:
-        run = RUNS[run_id]
-        df: pd.DataFrame = run["counts"]
-        filename = run.get("filename", "stored")
+    # Accept either:
+    # - run_id that already exists, or
+    # - file to create or refresh a run
+    if run_id:
+        st = _require_run(run_id)
     else:
         if file is None:
-            raise HTTPException(status_code=400, detail="Provide file or valid run_id")
-        raw = await file.read()
-        df = _read_counts_matrix(file, raw)
-        run_id = _new_run_id()
-        RUNS[run_id] = {"filename": file.filename, "counts": df}
-        filename = file.filename
+            raise HTTPException(status_code=422, detail="Provide run_id or file")
+        df = _read_counts(file)
+        run_id = uuid4().hex
+        st = RunState(filename=file.filename or "counts", raw_counts=df)
+        RUNS[run_id] = st
+
+    df = st.raw_counts
 
     total_counts = df.sum(axis=0)
     detected_genes = (df > 0).sum(axis=0)
-    pct_zeros = (df == 0).mean(axis=0)
+    pct_zeros = (df == 0).mean(axis=0) * 100.0
 
-    qc_payload = {
-        "total_counts": _five_number(total_counts),
-        "detected_genes": _five_number(detected_genes),
-        "pct_zeros": _five_number(pct_zeros),
-    }
-
-    RUNS[run_id]["qc"] = qc_payload
-
-    return {
+    qc = {
         "ok": True,
         "run_id": run_id,
-        "filename": filename,
+        "filename": st.filename,
         "shape": [int(df.shape[0]), int(df.shape[1])],
-        **qc_payload,
+        "total_counts": _quantiles(total_counts),
+        "detected_genes": _quantiles(detected_genes),
+        "pct_zeros": _quantiles(pct_zeros),
     }
+
+    st.qc = qc
+    return qc
 
 
 @app.post("/normalize")
-async def normalize(
+async def normalize_counts(
     file: Optional[UploadFile] = File(None),
     run_id: Optional[str] = Form(None),
 ):
-    if run_id and run_id in RUNS:
-        run = RUNS[run_id]
+    # Frontend can call with file (old behavior) or run_id (preferred after /upload).
+    if run_id:
+        st = _require_run(run_id)
     else:
         if file is None:
-            raise HTTPException(status_code=400, detail="Provide file or valid run_id")
-        raw = await file.read()
-        df = _read_counts_matrix(file, raw)
-        run_id = _new_run_id()
-        run = {"filename": file.filename, "counts": df}
-        RUNS[run_id] = run
+            raise HTTPException(status_code=422, detail="Provide run_id or file")
+        df = _read_counts(file)
+        run_id = uuid4().hex
+        st = RunState(filename=file.filename or "counts", raw_counts=df)
+        RUNS[run_id] = st
 
-    _ensure_normalized(run)
+    df = st.raw_counts
 
-    log1p: pd.DataFrame = run["normalized_log1p"]
-    libsize: Dict[str, float] = run["libsize"]
+    libsize = df.sum(axis=0).replace(0, np.nan)
+    cpm = df.div(libsize, axis=1) * 1e6
+    log1p_cpm = np.log1p(cpm).fillna(0.0)
 
+    # z-score per gene across cells
+    gene_mean = log1p_cpm.mean(axis=1)
+    gene_std = log1p_cpm.std(axis=1).replace(0, np.nan)
+    z = log1p_cpm.sub(gene_mean, axis=0).div(gene_std, axis=0).fillna(0.0)
+
+    st.norm_log1p_cpm = log1p_cpm
+    st.norm_z = z
+
+    # compact summary, full matrix goes via /export
     return {
         "ok": True,
         "run_id": run_id,
-        "filename": run.get("filename"),
-        "shape": [int(log1p.shape[0]), int(log1p.shape[1])],
-        "libsize_min": float(np.min(list(libsize.values()))),
-        "libsize_median": float(np.median(list(libsize.values()))),
-        "libsize_max": float(np.max(list(libsize.values()))),
-        "n_pcs": int(run["pcs"].shape[1]),
-        "pca_var_ratio_first5": [float(x) for x in run["pca_var_ratio"][:5]],
+        "filename": st.filename,
+        "shape": [int(df.shape[0]), int(df.shape[1])],
+        "libsize_summary": _quantiles(libsize.fillna(0.0)),
+        "log1p_cpm_summary": {
+            "min": float(log1p_cpm.min().min()),
+            "median": float(log1p_cpm.stack().median()),
+            "max": float(log1p_cpm.max().max()),
+        },
+        "z_summary": {
+            "min": float(z.min().min()),
+            "median": float(z.stack().median()),
+            "max": float(z.max().max()),
+        },
     }
 
 
 @app.post("/harmony")
-async def harmony(
+async def harmony_batch_correction(
     run_id: str = Form(...),
-    batches: Optional[str] = Form(None),
+    n_pcs: int = Form(30),
+    # optional, kept for compatibility with your frontend that currently sends file again
+    file: Optional[UploadFile] = File(None),
 ):
-    run = _get_run_or_400(run_id)
-    _ensure_normalized(run)
+    st = _require_run(run_id)
 
-    pcs: pd.DataFrame = run["pcs"]
-
-    if batches:
-        # batches can be JSON list or comma-separated
-        b = batches.strip()
-        if b.startswith("["):
-            try:
-                batch_list = json.loads(b)
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid JSON in batches")
+    # If normalized is missing, derive it from the file if provided, else error.
+    if st.norm_z is None:
+        if file is not None:
+            df = _read_counts(file)
+            st.raw_counts = df
+            libsize = df.sum(axis=0).replace(0, np.nan)
+            cpm = df.div(libsize, axis=1) * 1e6
+            log1p_cpm = np.log1p(cpm).fillna(0.0)
+            gene_mean = log1p_cpm.mean(axis=1)
+            gene_std = log1p_cpm.std(axis=1).replace(0, np.nan)
+            st.norm_z = log1p_cpm.sub(gene_mean, axis=0).div(gene_std, axis=0).fillna(0.0)
         else:
-            batch_list = [x.strip() for x in b.split(",") if x.strip()]
-        batch_list = [str(x) for x in batch_list]
-    else:
-        batch_list = _default_batches(list(pcs.index))
+            raise HTTPException(status_code=400, detail="Run /normalize first for this run_id")
 
-    corrected = _batch_center_pcs(pcs, batch_list)
-    run["harmony_pcs"] = corrected
-    run["batches"] = batch_list
+    z = st.norm_z  # genes x cells
+    X = z.T.values  # cells x genes
+
+    n_cells, n_features = X.shape
+    max_pcs = max(2, min(int(n_pcs), n_cells - 1, n_features))
+    pca = PCA(n_components=max_pcs, random_state=0)
+    pcs = pca.fit_transform(X)
+
+    # Minimal “batch correction” placeholder:
+    # If you later add batch labels, you can replace this with real Harmony.
+    harmony = pcs.copy()
+
+    pcs_df = pd.DataFrame(pcs, index=st.raw_counts.columns, columns=[f"PC{i+1}" for i in range(pcs.shape[1])])
+    harm_df = pd.DataFrame(harmony, index=st.raw_counts.columns, columns=[f"HPC{i+1}" for i in range(harmony.shape[1])])
+
+    st.pca_scores = pcs_df
+    st.harmony_scores = harm_df
 
     return {
         "ok": True,
         "run_id": run_id,
-        "n_cells": int(corrected.shape[0]),
-        "n_pcs": int(corrected.shape[1]),
-        "n_batches": int(len(set(batch_list))),
+        "n_pcs": int(harmony.shape[1]),
+        "explained_variance_ratio_first5": [float(x) for x in pca.explained_variance_ratio_[:5]],
+        "embedding_preview_first5": harm_df.iloc[:5, : min(5, harm_df.shape[1])].to_dict(orient="index"),
     }
 
 
 @app.post("/cluster")
-async def cluster(
+async def cluster_cells(
     run_id: str = Form(...),
-    k: int = Form(10),
+    k: int = Form(8),
 ):
-    run = _get_run_or_400(run_id)
-    _ensure_normalized(run)
+    st = _require_run(run_id)
 
-    Xdf: pd.DataFrame = run.get("harmony_pcs") or run["pcs"]
-    X = Xdf.values
+    if st.harmony_scores is None:
+        raise HTTPException(status_code=400, detail="Run /harmony first for this run_id")
 
+    X = st.harmony_scores.values
     k = int(k)
-    k = max(2, min(k, max(2, X.shape[0] - 1)))
+    if k < 2 or k > max(2, X.shape[0] - 1):
+        raise HTTPException(status_code=400, detail="Invalid k for clustering")
 
-    km = KMeans(n_clusters=k, random_state=0, n_init=10)
+    km = KMeans(n_clusters=k, random_state=0, n_init="auto")
     labels = km.fit_predict(X)
 
-    clusters = pd.Series(labels, index=Xdf.index, name="cluster")
-    run["clusters"] = clusters
-    run["kmeans_inertia"] = float(km.inertia_)
+    s = pd.Series(labels, index=st.harmony_scores.index, name="cluster")
+    st.clusters = s
 
-    counts = clusters.value_counts().sort_index().to_dict()
-
+    counts = s.value_counts().sort_index().to_dict()
     return {
         "ok": True,
         "run_id": run_id,
         "k": k,
         "cluster_counts": {str(int(k)): int(v) for k, v in counts.items()},
-        "inertia": float(km.inertia_),
     }
 
 
 @app.post("/train")
-async def train(
+async def train_model(
     run_id: str = Form(...),
-    algorithm: str = Form("rf"),
+    test_size: float = Form(0.2),
 ):
-    run = _get_run_or_400(run_id)
-    _ensure_normalized(run)
+    st = _require_run(run_id)
 
-    clusters: pd.Series = run.get("clusters")
-    if clusters is None:
-        raise HTTPException(status_code=400, detail="Run clustering first")
+    if st.harmony_scores is None or st.clusters is None:
+        raise HTTPException(status_code=400, detail="Run /harmony and /cluster first for this run_id")
 
-    Xdf: pd.DataFrame = run.get("harmony_pcs") or run["pcs"]
-    X = Xdf.values
-    y = clusters.loc[Xdf.index].values
+    X = st.harmony_scores.values
+    y = st.clusters.values
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=0, stratify=y if len(np.unique(y)) > 1 else None
-    )
+    # stratify if possible
+    strat = y if len(np.unique(y)) > 1 else None
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=float(test_size), random_state=0, stratify=strat)
 
-    algo = algorithm.lower().strip()
-    if algo != "rf":
-        raise HTTPException(status_code=400, detail="Only algorithm=rf is implemented in this demo")
+    clf = LogisticRegression(max_iter=2000, multi_class="auto")
+    clf.fit(Xtr, ytr)
+    pred = clf.predict(Xte)
 
-    clf = RandomForestClassifier(
-        n_estimators=300,
-        random_state=0,
-        n_jobs=-1,
-        class_weight="balanced_subsample",
-    )
-    clf.fit(X_train, y_train)
+    acc = float(accuracy_score(yte, pred))
+    f1m = float(f1_score(yte, pred, average="macro"))
 
-    y_pred = clf.predict(X_test)
-
-    acc = float(accuracy_score(y_test, y_pred))
-    f1m = float(f1_score(y_test, y_pred, average="macro"))
-
-    run["model"] = clf
-    run["train_metrics"] = {"accuracy": acc, "f1_macro": f1m, "n_test": int(len(y_test))}
-
-    return {
+    metrics = {
         "ok": True,
         "run_id": run_id,
-        "algorithm": "rf",
-        "metrics": run["train_metrics"],
+        "task": "predict_cluster_from_harmony_pcs",
+        "n_train": int(Xtr.shape[0]),
+        "n_test": int(Xte.shape[0]),
+        "accuracy": acc,
+        "macro_f1": f1m,
     }
+
+    st.train_metrics = metrics
+    return metrics
 
 
 @app.post("/export")
-async def export(
-    run_id: str = Form(...),
-):
-    run = _get_run_or_400(run_id)
-
-    # Ensure we have at least normalized outputs for export
-    if "counts" not in run:
-        raise HTTPException(status_code=400, detail="No counts in this run")
-
-    if "normalized_log1p" not in run or "pcs" not in run:
-        _ensure_normalized(run)
+async def export_bundle(run_id: str = Form(...)):
+    st = _require_run(run_id)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
         # qc
-        qc_obj = run.get("qc", {"note": "QC not run"})
-        z.writestr("qc.json", json.dumps(qc_obj, indent=2))
+        if st.qc is not None:
+            z.writestr("qc_summary.json", json.dumps(st.qc, indent=2))
 
         # normalized
-        norm: pd.DataFrame = run["normalized_log1p"]
-        z.writestr("normalized_log1p.csv", norm.to_csv())
+        if st.norm_log1p_cpm is not None:
+            z.writestr("normalized_log1p_cpm.csv", st.norm_log1p_cpm.to_csv())
+        if st.norm_z is not None:
+            z.writestr("normalized_zscore.csv", st.norm_z.to_csv())
 
-        # pcs
-        pcs: pd.DataFrame = run["pcs"]
-        z.writestr("pcs.csv", pcs.to_csv(index=True))
-
-        # harmony pcs
-        if "harmony_pcs" in run:
-            hpcs: pd.DataFrame = run["harmony_pcs"]
-            z.writestr("harmony_pcs.csv", hpcs.to_csv(index=True))
+        # embeddings
+        if st.pca_scores is not None:
+            z.writestr("pca_scores.csv", st.pca_scores.to_csv(index=True))
+        if st.harmony_scores is not None:
+            z.writestr("harmony_scores.csv", st.harmony_scores.to_csv(index=True))
 
         # clusters
-        if "clusters" in run:
-            cl: pd.Series = run["clusters"]
-            z.writestr("clusters.csv", cl.to_csv(index=True))
+        if st.clusters is not None:
+            z.writestr("clusters.csv", st.clusters.to_csv(index=True))
 
-        # training metrics
-        if "train_metrics" in run:
-            z.writestr("train_metrics.json", json.dumps(run["train_metrics"], indent=2))
+        # training
+        if st.train_metrics is not None:
+            z.writestr("train_metrics.json", json.dumps(st.train_metrics, indent=2))
 
-        # manifest
-        manifest = {
-            "run_id": run_id,
-            "filename": run.get("filename"),
-            "has_qc": "qc" in run,
-            "has_harmony": "harmony_pcs" in run,
-            "has_clusters": "clusters" in run,
-            "has_model": "model" in run,
-        }
-        z.writestr("manifest.json", json.dumps(manifest, indent=2))
+        # raw counts
+        z.writestr("raw_counts.csv", st.raw_counts.to_csv())
 
     buf.seek(0)
 
-    headers = {"Content-Disposition": f'attachment; filename="rnaseq_export_{run_id}.zip"'}
-    return StreamingResponse(buf, media_type="application/zip", headers=headers)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="rnaseq_export_{run_id}.zip"'},
+    )
