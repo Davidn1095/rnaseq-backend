@@ -367,18 +367,21 @@ async def train(request: Request):
     )
 
     # StratifiedKFold requires each class to have at least n_splits samples.
-    # With small clusters (for example size 1), fixed 5-fold CV will crash.
     n_splits = int(min(5, min_class_size))
 
     accs = []
+    acc_mean = None
+    acc_std = None
+
     if n_splits >= 2:
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
         for tr, te in skf.split(X, y):
             clf.fit(X[tr], y[tr])
             pred = clf.predict(X[te])
             accs.append(accuracy_score(y[te], pred))
+        acc_mean = float(np.mean(accs))
+        acc_std = float(np.std(accs))
     else:
-        # Not enough samples per class for stratified CV; fit once and report no-CV.
         n_splits = 0
 
     # Fit final model
@@ -386,12 +389,13 @@ async def train(request: Request):
     RUNS[rid]["model"] = clf
     RUNS[rid]["train_metrics"] = {
         "cv_folds": int(n_splits),
-        "accuracy_mean": float(np.mean(accs)) if accs else float("nan"),
-        "accuracy_std": float(np.std(accs)) if accs else float("nan"),
+        "accuracy_mean": acc_mean,  # null in JSON if no CV
+        "accuracy_std": acc_std,    # null in JSON if no CV
         "n_cells": int(X.shape[0]),
         "n_features": int(X.shape[1]),
         "n_classes": n_classes,
         "min_class_size": int(min_class_size),
+        "cv_note": "CV skipped: min_class_size < 2" if int(n_splits) == 0 else "ok",
     }
 
     return {
