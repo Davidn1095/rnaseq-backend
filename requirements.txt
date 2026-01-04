@@ -1,7 +1,9 @@
-# requirements.txt
 fastapi
 uvicorn[standard]
 python-multipart
 pandas
 numpy
+scipy
 scikit-learn
+harmonypy
+joblib
