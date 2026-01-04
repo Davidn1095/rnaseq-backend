@@ -304,20 +304,102 @@ async def cluster(request: Request):
 async def train(request: Request):
     run_id, f, filename = await _parse_run_id_and_file(request)
     if not run_id:
-        raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+        )
     rid = run_id
 
-    if rid not in RUNS and f is not None:
+    # If a file is provided, (re)build counts for this run_id on THIS instance.
+    # This makes /train robust on Cloud Run even when previous steps ran elsewhere.
+    if f is not None:
         raw = await f.read()
         df = _read_counts_csv(raw, filename or "counts.csv")
+        RUNS.setdefault(rid, {})
         _store_counts(rid, df, filename or "counts.csv")
+    else:
+        # No file provided: require prior state on this instance
+        _ = _get_counts(rid)  # raises 404 if missing
 
+    # ----------------------------
+    # Ensure normalized
+    # ----------------------------
+    norm_df = RUNS.get(rid, {}).get("normalized")
+    if norm_df is None:
+        df = _get_counts(rid)
+        libsize = df.sum(axis=0, skipna=True).replace(0, pd.NA)
+        cpm = df.div(libsize, axis=1) * 1e6
+        log1p_cpm = np.log1p(cpm.fillna(0).to_numpy(dtype=float))
+        norm_df = pd.DataFrame(log1p_cpm, index=df.index, columns=df.columns)
+        RUNS[rid]["normalized"] = norm_df
+
+    # ----------------------------
+    # Ensure embedding (Harmony fallback)
+    # ----------------------------
     Z = RUNS.get(rid, {}).get("embedding")
+    if Z is None:
+        X = norm_df.to_numpy(dtype=float).T  # cells x genes
+        n_cells, n_genes = X.shape
+        n_pcs = int(min(30, max(2, n_cells - 1), max(2, n_genes - 1)))
+        pca = PCA(n_components=n_pcs, random_state=0)
+        Z0 = pca.fit_transform(X)
+
+        batches = RUNS.get(rid, {}).get("batches")
+        if batches is None:
+            batches = np.zeros(n_cells, dtype=int)
+        else:
+            batches = np.asarray(batches)
+
+        applied = False
+        reason = ""
+        Z_corr = Z0
+
+        if hm is None or len(np.unique(batches)) <= 1:
+            applied = False
+            reason = "harmonypy missing or n_batches<=1"
+        else:
+            try:
+                ho = hm.run_harmony(Z0, pd.DataFrame({"batch": batches}), "batch")
+                Z_corr = ho.Z_corr.T
+                applied = True
+                reason = "ok"
+            except Exception as e:
+                applied = False
+                reason = f"harmony error: {e}"
+
+        RUNS[rid]["embedding"] = Z_corr
+        RUNS[rid]["embedding_name"] = "pca_harmony" if applied else "pca_fallback"
+        RUNS[rid]["harmony_meta"] = {"applied": bool(applied), "reason": reason}
+        Z = Z_corr
+
+    # ----------------------------
+    # Ensure clusters
+    # ----------------------------
     y = RUNS.get(rid, {}).get("clusters")
+    k_used = None
+    cluster_sizes = None
 
-    if Z is None or y is None:
-        raise HTTPException(status_code=400, detail="Missing embedding or clusters. Run /harmony and /cluster first.")
+    if y is None:
+        Zm = np.asarray(Z, dtype=float)
+        n_cells = int(Zm.shape[0])
+        k = int(min(6, max(2, n_cells // 10))) if n_cells >= 20 else 3
+        km = KMeans(n_clusters=k, random_state=0, n_init=10)
+        y = km.fit_predict(Zm)
 
+        RUNS[rid]["clusters"] = y
+        k_used = int(k)
+        cluster_sizes = {str(i): int(np.sum(y == i)) for i in range(k)}
+    else:
+        y = np.asarray(y, dtype=int)
+        # still compute sizes for reporting
+        uniq = np.unique(y)
+        cluster_sizes = {str(int(i)): int(np.sum(y == i)) for i in uniq}
+        k_used = int(len(uniq))
+
+    # ----------------------------
+    # Train: Logistic regression on embedding -> cluster label
+    # (CV folds adapt to smallest class; avoid NaN in JSON)
+    # ----------------------------
     X = np.asarray(Z, dtype=float)
     y = np.asarray(y, dtype=int)
 
@@ -332,12 +414,10 @@ async def train(request: Request):
         n_jobs=None,
     )
 
-    # StratifiedKFold requires each class to have at least n_splits samples.
     n_splits = int(min(5, min_class_size))
-
     accs = []
-    acc_mean: Optional[float] = None
-    acc_std: Optional[float] = None
+    acc_mean = None
+    acc_std = None
 
     if n_splits >= 2:
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
@@ -354,13 +434,16 @@ async def train(request: Request):
     RUNS[rid]["model"] = clf
     RUNS[rid]["train_metrics"] = {
         "cv_folds": int(n_splits),
-        "accuracy_mean": acc_mean,
-        "accuracy_std": acc_std,
+        "accuracy_mean": acc_mean,  # null if CV skipped
+        "accuracy_std": acc_std,    # null if CV skipped
         "n_cells": int(X.shape[0]),
         "n_features": int(X.shape[1]),
         "n_classes": n_classes,
         "min_class_size": int(min_class_size),
         "cv_note": "CV skipped: min_class_size < 2" if int(n_splits) == 0 else "ok",
+        "embedding": RUNS.get(rid, {}).get("embedding_name", "pca_fallback"),
+        "k": int(k_used) if k_used is not None else None,
+        "cluster_sizes": cluster_sizes,
     }
 
     return {
