@@ -30,8 +30,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
-)
+    allow_headers=["*"])
 
 # ----------------------------
 # In-memory run store (demo)
@@ -158,8 +157,7 @@ async def qc(request: Request):
         if not run_id:
             raise HTTPException(
                 status_code=422,
-                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
-            )
+                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
         rid = run_id
         df = _get_counts(rid)
 
@@ -194,8 +192,7 @@ async def normalize(request: Request):
         if not run_id:
             raise HTTPException(
                 status_code=422,
-                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
-            )
+                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
         rid = run_id
         df = _get_counts(rid)
 
@@ -227,8 +224,7 @@ async def harmony(request: Request):
     if not run_id:
         raise HTTPException(
             status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
-        )
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
     rid = run_id
 
     # If server restarted and caller provided file, allow rebuilding
@@ -297,8 +293,7 @@ async def cluster(request: Request):
     if not run_id:
         raise HTTPException(
             status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
-        )
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
     rid = run_id
 
     if rid not in RUNS and f is not None:
@@ -333,8 +328,7 @@ async def train(request: Request):
     if not run_id:
         raise HTTPException(
             status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
-        )
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
     rid = run_id
 
     # Cloud Run robustness: if file included, rebuild run on this instance
@@ -412,7 +406,7 @@ async def train(request: Request):
         n_classes = int(classes.size)
         min_class_size = int(class_counts.min()) if class_counts.size else 0
 
-        clf = LogisticRegression(max_iter=2000, multi_class="auto", solver="lbfgs", n_jobs=None)
+        clf = LogisticRegression(max_iter=2000)
 
         n_splits = int(min(5, min_class_size))
         accs = []
@@ -468,8 +462,7 @@ async def export(request: Request):
     if not run_id:
         raise HTTPException(
             status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
-        )
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
     rid = run_id
 
     # If server restarted and caller provided file, allow rebuilding counts (best effort)
