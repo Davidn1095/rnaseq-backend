@@ -45,7 +45,13 @@ RUNS: Dict[str, Dict[str, Any]] = {}
 def _percentiles(x: np.ndarray) -> Dict[str, float]:
     x = np.asarray(x, dtype=float)
     if x.size == 0:
-        return {"min": float("nan"), "p25": float("nan"), "p50": float("nan"), "p75": float("nan"), "max": float("nan")}
+        return {
+            "min": float("nan"),
+            "p25": float("nan"),
+            "p50": float("nan"),
+            "p75": float("nan"),
+            "max": float("nan"),
+        }
     q = np.percentile(x, [0, 25, 50, 75, 100])
     return {"min": float(q[0]), "p25": float(q[1]), "p50": float(q[2]), "p75": float(q[3]), "max": float(q[4])}
 
@@ -111,7 +117,7 @@ def _ensure_run(run_id: Optional[str]) -> str:
 def _get_counts(rid: str) -> pd.DataFrame:
     df = RUNS.get(rid, {}).get("counts")
     if df is None:
-        raise HTTPException(status_code=404, detail='run_id not found. Re-run /upload or /qc.')
+        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
     return df
 
 
@@ -136,7 +142,12 @@ async def upload(request: Request):
     df = _read_counts_csv(raw, filename or "counts.csv")
     rid = _ensure_run(run_id)
     _store_counts(rid, df, filename or "counts.csv")
-    return {"ok": True, "run_id": rid, "filename": filename or "counts.csv", "shape": [int(df.shape[0]), int(df.shape[1])]}
+    return {
+        "ok": True,
+        "run_id": rid,
+        "filename": filename or "counts.csv",
+        "shape": [int(df.shape[0]), int(df.shape[1])],
+    }
 
 
 @app.post("/qc")
@@ -150,7 +161,10 @@ async def qc(request: Request):
         _store_counts(rid, df, filename or "counts.csv")
     else:
         if not run_id:
-            raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+            raise HTTPException(
+                status_code=422,
+                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+            )
         rid = run_id
         df = _get_counts(rid)
 
@@ -183,7 +197,10 @@ async def normalize(request: Request):
         _store_counts(rid, df, filename or "counts.csv")
     else:
         if not run_id:
-            raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+            raise HTTPException(
+                status_code=422,
+                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+            )
         rid = run_id
         df = _get_counts(rid)
 
@@ -213,7 +230,10 @@ async def normalize(request: Request):
 async def harmony(request: Request):
     run_id, f, filename = await _parse_run_id_and_file(request)
     if not run_id:
-        raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+        )
     rid = run_id
 
     # If server restarted and caller provided file, allow rebuilding
@@ -279,7 +299,10 @@ async def harmony(request: Request):
 async def cluster(request: Request):
     run_id, f, filename = await _parse_run_id_and_file(request)
     if not run_id:
-        raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+        )
     rid = run_id
 
     if rid not in RUNS and f is not None:
@@ -289,7 +312,7 @@ async def cluster(request: Request):
 
     Z = RUNS.get(rid, {}).get("embedding")
     if Z is None:
-        raise HTTPException(status_code=404, detail='run_id not found. Re-run /upload or /qc.')
+        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
 
     n_cells = int(Z.shape[0])
     k = int(min(6, max(2, n_cells // 10))) if n_cells >= 20 else 3
@@ -312,7 +335,10 @@ async def cluster(request: Request):
 async def train(request: Request):
     run_id, f, filename = await _parse_run_id_and_file(request)
     if not run_id:
-        raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+        )
     rid = run_id
 
     if rid not in RUNS and f is not None:
@@ -329,7 +355,10 @@ async def train(request: Request):
     X = np.asarray(Z, dtype=float)
     y = np.asarray(y, dtype=int)
 
-    n_classes = int(len(np.unique(y)))
+    classes, class_counts = np.unique(y, return_counts=True)
+    n_classes = int(classes.size)
+    min_class_size = int(class_counts.min()) if class_counts.size else 0
+
     clf = LogisticRegression(
         max_iter=2000,
         multi_class="auto",
@@ -337,23 +366,32 @@ async def train(request: Request):
         n_jobs=None,
     )
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    # StratifiedKFold requires each class to have at least n_splits samples.
+    # With small clusters (for example size 1), fixed 5-fold CV will crash.
+    n_splits = int(min(5, min_class_size))
+
     accs = []
-    for tr, te in skf.split(X, y):
-        clf.fit(X[tr], y[tr])
-        pred = clf.predict(X[te])
-        accs.append(accuracy_score(y[te], pred))
+    if n_splits >= 2:
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        for tr, te in skf.split(X, y):
+            clf.fit(X[tr], y[tr])
+            pred = clf.predict(X[te])
+            accs.append(accuracy_score(y[te], pred))
+    else:
+        # Not enough samples per class for stratified CV; fit once and report no-CV.
+        n_splits = 0
 
     # Fit final model
     clf.fit(X, y)
     RUNS[rid]["model"] = clf
     RUNS[rid]["train_metrics"] = {
-        "cv_folds": 5,
-        "accuracy_mean": float(np.mean(accs)),
-        "accuracy_std": float(np.std(accs)),
+        "cv_folds": int(n_splits),
+        "accuracy_mean": float(np.mean(accs)) if accs else float("nan"),
+        "accuracy_std": float(np.std(accs)) if accs else float("nan"),
         "n_cells": int(X.shape[0]),
         "n_features": int(X.shape[1]),
         "n_classes": n_classes,
+        "min_class_size": int(min_class_size),
     }
 
     return {
@@ -371,7 +409,10 @@ async def train(request: Request):
 async def export(request: Request):
     run_id, f, filename = await _parse_run_id_and_file(request)
     if not run_id:
-        raise HTTPException(status_code=422, detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}],
+        )
     rid = run_id
 
     # If server restarted and caller provided file, allow rebuilding counts (best effort)
@@ -381,7 +422,7 @@ async def export(request: Request):
         _store_counts(rid, df, filename or "counts.csv")
 
     if rid not in RUNS:
-        raise HTTPException(status_code=404, detail='run_id not found. Re-run /upload or /qc.')
+        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
 
     qc_obj = RUNS[rid].get("qc")
     norm_df: Optional[pd.DataFrame] = RUNS[rid].get("normalized")
