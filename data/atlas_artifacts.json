@@ -1,25 +1,14 @@
 {
-  "umap": [
-    {"cell_id": "C1", "x": 1.2, "y": 0.5, "cell_type": "CD4 T cells", "disease": "Healthy", "module_score": 0.42},
-    {"cell_id": "C2", "x": 1.0, "y": 0.7, "cell_type": "CD4 T cells", "disease": "SLE", "module_score": 0.65},
-    {"cell_id": "C3", "x": -0.4, "y": 1.1, "cell_type": "CD8 T cells", "disease": "Healthy", "module_score": 0.31},
-    {"cell_id": "C4", "x": -0.2, "y": 0.9, "cell_type": "CD8 T cells", "disease": "SLE", "module_score": 0.58},
-    {"cell_id": "C5", "x": 0.3, "y": -0.8, "cell_type": "B cells", "disease": "Healthy", "module_score": 0.27},
-    {"cell_id": "C6", "x": 0.5, "y": -1.0, "cell_type": "B cells", "disease": "SLE", "module_score": 0.49},
-    {"cell_id": "C7", "x": -1.1, "y": -0.6, "cell_type": "NK cells", "disease": "Healthy", "module_score": 0.73},
-    {"cell_id": "C8", "x": -1.3, "y": -0.4, "cell_type": "NK cells", "disease": "SLE", "module_score": 0.81},
-    {"cell_id": "C9", "x": 0.7, "y": 1.3, "cell_type": "Monocytes", "disease": "Healthy", "module_score": 1.12},
-    {"cell_id": "C10", "x": 0.9, "y": 1.5, "cell_type": "Monocytes", "disease": "SLE", "module_score": 1.35}
-  ],
+  "umap": [],
   "dotplot": {
     "groupings": {
       "cell_type": {
-        "groups": ["CD4 T cells", "CD8 T cells", "B cells", "NK cells", "Monocytes"],
+        "groups": [],
         "genes": {
-          "IL7R": {"avg": [1.4, 0.6, 0.2, 0.1, 0.3], "pct": [0.82, 0.41, 0.12, 0.08, 0.21]},
-          "NKG7": {"avg": [0.2, 1.6, 0.1, 1.8, 0.4], "pct": [0.18, 0.77, 0.05, 0.89, 0.33]},
-          "MS4A1": {"avg": [0.1, 0.1, 1.9, 0.1, 0.2], "pct": [0.05, 0.04, 0.91, 0.03, 0.08]},
-          "LYZ": {"avg": [0.3, 0.4, 0.5, 0.6, 2.2], "pct": [0.22, 0.31, 0.29, 0.34, 0.95]}
+          "IL7R": {
+            "avg": [],
+            "pct": []
+          }
         }
       }
     }
@@ -29,37 +18,12 @@
       "cell_type": {
         "genes": {
           "IL7R": {
-            "bins": [0.0, 0.5, 1.0, 1.5, 2.0],
+            "bins": [],
             "counts": {
-              "CD4 T cells": [2, 5, 8, 4],
-              "CD8 T cells": [5, 7, 2, 1],
-              "B cells": [6, 4, 1, 0],
-              "NK cells": [8, 3, 0, 0],
-              "Monocytes": [4, 6, 1, 0]
+              "CD4 T cells": []
             },
             "quantiles": {
-              "CD4 T cells": [0.2, 0.8, 1.4],
-              "CD8 T cells": [0.1, 0.4, 0.9],
-              "B cells": [0.05, 0.2, 0.6],
-              "NK cells": [0.02, 0.1, 0.3],
-              "Monocytes": [0.08, 0.3, 0.7]
-            }
-          },
-          "NKG7": {
-            "bins": [0.0, 0.5, 1.0, 1.5, 2.0],
-            "counts": {
-              "CD4 T cells": [7, 4, 2, 1],
-              "CD8 T cells": [1, 3, 6, 5],
-              "B cells": [8, 2, 1, 0],
-              "NK cells": [0, 2, 5, 9],
-              "Monocytes": [5, 4, 2, 1]
-            },
-            "quantiles": {
-              "CD4 T cells": [0.05, 0.2, 0.6],
-              "CD8 T cells": [0.3, 0.9, 1.4],
-              "B cells": [0.02, 0.1, 0.4],
-              "NK cells": [0.6, 1.2, 1.8],
-              "Monocytes": [0.1, 0.5, 0.9]
+              "CD4 T cells": []
             }
           }
         }
@@ -68,19 +32,9 @@
   },
   "de": {
     "contrasts": {
-      "SLE_vs_Healthy": {
+      "Placeholder_vs_Healthy": {
         "cell_types": {
-          "CD4 T cells": [
-            {"gene": "IFIT1", "logfc": 1.7, "padj": 0.0004, "pct_in": 0.62, "pct_out": 0.12},
-            {"gene": "ISG15", "logfc": 1.4, "padj": 0.0012, "pct_in": 0.55, "pct_out": 0.18},
-            {"gene": "IL7R", "logfc": -0.8, "padj": 0.02, "pct_in": 0.22, "pct_out": 0.48},
-            {"gene": "CCR7", "logfc": -0.6, "padj": 0.04, "pct_in": 0.18, "pct_out": 0.35}
-          ],
-          "Monocytes": [
-            {"gene": "LYZ", "logfc": 1.2, "padj": 0.003, "pct_in": 0.88, "pct_out": 0.52},
-            {"gene": "S100A8", "logfc": 1.0, "padj": 0.01, "pct_in": 0.72, "pct_out": 0.44},
-            {"gene": "FCGR3A", "logfc": -0.7, "padj": 0.02, "pct_in": 0.31, "pct_out": 0.59}
-          ]
+          "CD4 T cells": []
         }
       }
     }
@@ -90,19 +44,15 @@
       "IFN": {
         "groupings": {
           "cell_type": {
-            "bins": [0.0, 0.5, 1.0, 1.5, 2.0],
+            "bins": [],
             "counts": {
-              "CD4 T cells": [3, 6, 4, 1],
-              "CD8 T cells": [2, 5, 6, 2],
-              "B cells": [4, 7, 3, 1],
-              "NK cells": [1, 4, 7, 3],
-              "Monocytes": [0, 3, 6, 5]
+              "CD4 T cells": []
             }
           }
         },
         "feature_plot": {
-          "cell_ids": ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"],
-          "values": [0.4, 0.7, 0.3, 0.6, 0.2, 0.5, 0.8, 1.0, 1.1, 1.3]
+          "cell_ids": [],
+          "values": []
         }
       }
     }
