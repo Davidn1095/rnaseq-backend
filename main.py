@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Atlas API")
@@ -74,3 +75,32 @@ def markers(panel: str = Query(default="default")):
     if panel != "default":
         return {"ok": False, "error": "unknown panel", "available": ["default"]}
     return {"ok": True, "panel": panel, "genes": MARKERS_DEFAULT}
+
+@app.get("/de/volcano")
+def de_volcano(
+    disease: str = Query(...),
+    cell_type: str = Query(...),
+):
+    return JSONResponse(
+        status_code=501,
+        content={
+            "ok": False,
+            "message": "Differential expression volcano endpoint is not implemented yet.",
+            "requested": {"disease": disease, "cell_type": cell_type},
+        },
+    )
+
+@app.get("/de/overlap")
+def de_overlap(
+    left: str = Query(...),
+    right: str = Query(...),
+    cell_type: str = Query(...),
+):
+    return JSONResponse(
+        status_code=501,
+        content={
+            "ok": False,
+            "message": "Differential expression overlap endpoint is not implemented yet.",
+            "requested": {"left": left, "right": right, "cell_type": cell_type},
+        },
+    )
