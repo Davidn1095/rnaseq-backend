@@ -1,513 +1,76 @@
-# main.py
-import io
-import json
-import uuid
-import zipfile
-from typing import Any, Dict, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from typing import Any, Dict, List, Optional
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import StreamingResponse
 
-# Optional deps
-try:
-    import harmonypy as hm  # type: ignore
-except Exception:
-    hm = None
-
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score
-
-app = FastAPI(title="RNA-seq preprocessing API")
+app = FastAPI(title="Atlas API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"])
+    allow_headers=["*"],
+)
 
-# ----------------------------
-# In-memory run store (demo)
-# NOTE: Cloud Run can restart; UI should call /upload again if run_id is lost.
-# ----------------------------
-RUNS: Dict[str, Dict[str, Any]] = {}
+TISSUE = "PBMC"
 
+ACCESSIONS: List[Dict[str, Any]] = [
+    {"id": "GSE000000", "disease": "Healthy", "platform": "10x 3' v2", "donors": 12, "cells": 50210, "tissue": TISSUE},
+    {"id": "GSE000001", "disease": "Healthy", "platform": "10x 3' v3", "donors": 9,  "cells": 38840, "tissue": TISSUE},
 
-def _percentiles(x: np.ndarray) -> Dict[str, float]:
-    x = np.asarray(x, dtype=float)
-    if x.size == 0:
-        return {
-            "min": float("nan"),
-            "p25": float("nan"),
-            "p50": float("nan"),
-            "p75": float("nan"),
-            "max": float("nan"),
-        }
-    q = np.percentile(x, [0, 25, 50, 75, 100])
-    return {"min": float(q[0]), "p25": float(q[1]), "p50": float(q[2]), "p75": float(q[3]), "max": float(q[4])}
+    {"id": "GSE156989", "disease": "SLE", "platform": "10x 3' v2", "donors": 24, "cells": 80312, "tissue": TISSUE},
+    {"id": "GSE135779", "disease": "SLE", "platform": "10x 3' v2", "donors": 14, "cells": 42190, "tissue": TISSUE},
+    {"id": "GSE157278", "disease": "SjS", "platform": "10x 3' v3", "donors": 18, "cells": 61234, "tissue": TISSUE},
+    {"id": "HRA003613", "disease": "RA",  "platform": "10x 5'",     "donors": 10, "cells": 28740, "tissue": TISSUE},
+]
 
+CELL_TYPES = [
+    "CD4 T cells",
+    "CD8 T cells",
+    "B cells",
+    "NK cells",
+    "Monocytes",
+    "Dendritic cells",
+    "Plasma cells",
+]
 
-def _infer_sep(filename: str, sample: bytes) -> str:
-    fn = (filename or "").lower()
-    if fn.endswith(".tsv") or fn.endswith(".txt"):
-        return "\t"
-    # fallback: sniff header
-    head = sample[:4096].decode("utf-8", errors="ignore")
-    first_line = head.splitlines()[0] if head.splitlines() else ""
-    return "\t" if first_line.count("\t") > first_line.count(",") else ","
+MARKERS_DEFAULT = [
+    "IL7R","CCR7","LTB","NKG7","GNLY","MS4A1","CD79A","MZB1",
+    "LYZ","S100A8","FCGR3A","LST1","FCER1A","CLEC10A",
+]
 
-
-def _read_counts_csv(bytes_blob: bytes, filename: str) -> pd.DataFrame:
-    sep = _infer_sep(filename, bytes_blob)
-    df = pd.read_csv(io.BytesIO(bytes_blob), sep=sep, index_col=0)
-    # coerce numeric
-    df = df.apply(pd.to_numeric, errors="coerce")
-    if df.isna().all().all():
-        raise HTTPException(status_code=400, detail="All values are non-numeric after coercion")
-    # replace NaNs with 0 for count-like behavior
-    df = df.fillna(0)
-    return df
-
-
-async def _parse_run_id_and_file(request: Request) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
-    """
-    Accept either:
-      - query param: ?run_id=...
-      - multipart/form-data: fields run_id (optional), file (optional UploadFile)
-      - application/json: {"run_id": "..."}
-    Returns: (run_id, upload_file, filename)
-    """
-    qp_run_id = request.query_params.get("run_id")
-    ct = (request.headers.get("content-type") or "").lower()
-
-    if "application/json" in ct:
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        run_id = data.get("run_id") or qp_run_id
-        return (str(run_id) if run_id else None, None, None)
-
-    # multipart or others: try form()
-    try:
-        form = await request.form()
-    except Exception:
-        return (str(qp_run_id) if qp_run_id else None, None, None)
-
-    run_id = form.get("run_id") or qp_run_id
-    f = form.get("file")
-    filename = getattr(f, "filename", None) if f is not None else None
-    return (str(run_id) if run_id else None, f, filename)
-
-
-def _ensure_run(run_id: Optional[str]) -> str:
-    rid = run_id or uuid.uuid4().hex
-    if rid not in RUNS:
-        RUNS[rid] = {}
-    return rid
-
-
-def _get_counts(rid: str) -> pd.DataFrame:
-    df = RUNS.get(rid, {}).get("counts")
-    if df is None:
-        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
-    return df
-
-
-def _store_counts(rid: str, df: pd.DataFrame, filename: str) -> None:
-    RUNS.setdefault(rid, {})
-    RUNS[rid]["counts"] = df
-    RUNS[rid]["filename"] = filename
-    RUNS[rid]["shape"] = [int(df.shape[0]), int(df.shape[1])]
-
+def _diseases() -> List[str]:
+    ds = sorted({a["disease"] for a in ACCESSIONS})
+    # ensure Healthy first if present
+    return ["Healthy"] + [d for d in ds if d != "Healthy"] if "Healthy" in ds else ds
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-
-@app.post("/upload")
-async def upload(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-    if f is None:
-        raise HTTPException(status_code=400, detail="Missing file in multipart/form-data as field 'file'")
-    raw = await f.read()
-    df = _read_counts_csv(raw, filename or "counts.csv")
-    rid = _ensure_run(run_id)
-    _store_counts(rid, df, filename or "counts.csv")
-    return {"ok": True, "run_id": rid, "filename": filename or "counts.csv", "shape": [int(df.shape[0]), int(df.shape[1])]}
-
-
-@app.post("/qc")
-async def qc(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-
-    if f is not None:
-        raw = await f.read()
-        df = _read_counts_csv(raw, filename or "counts.csv")
-        rid = _ensure_run(run_id)
-        _store_counts(rid, df, filename or "counts.csv")
-    else:
-        if not run_id:
-            raise HTTPException(
-                status_code=422,
-                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
-        rid = run_id
-        df = _get_counts(rid)
-
-    total_counts = df.sum(axis=0).to_numpy(dtype=float)
-    detected_genes = (df.to_numpy(dtype=float) > 0).sum(axis=0).astype(float)
-    pct_zeros = (df.to_numpy(dtype=float) == 0).sum(axis=0).astype(float) / max(1.0, float(df.shape[0]))
-
-    out = {
-        "ok": True,
-        "run_id": rid,
-        "filename": RUNS.get(rid, {}).get("filename", filename or "counts.csv"),
-        "shape": [int(df.shape[0]), int(df.shape[1])],
-        "total_counts": _percentiles(total_counts),
-        "detected_genes": _percentiles(detected_genes),
-        "pct_zeros": _percentiles(pct_zeros),
-    }
-
-    RUNS[rid]["qc"] = out
-    return out
-
-
-@app.post("/normalize")
-async def normalize(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-
-    if f is not None:
-        raw = await f.read()
-        df = _read_counts_csv(raw, filename or "counts.csv")
-        rid = _ensure_run(run_id)
-        _store_counts(rid, df, filename or "counts.csv")
-    else:
-        if not run_id:
-            raise HTTPException(
-                status_code=422,
-                detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
-        rid = run_id
-        df = _get_counts(rid)
-
-    libsize = df.sum(axis=0, skipna=True).replace(0, pd.NA)
-    cpm = df.div(libsize, axis=1) * 1e6
-    log1p_cpm = np.log1p(cpm.fillna(0).to_numpy(dtype=float))
-
-    # store normalized matrix as DataFrame with same index/cols
-    norm_df = pd.DataFrame(log1p_cpm, index=df.index, columns=df.columns)
-    RUNS[rid]["normalized"] = norm_df
-
+@app.get("/atlas/manifest")
+def manifest():
     return {
         "ok": True,
-        "run_id": rid,
-        "filename": RUNS.get(rid, {}).get("filename", filename or "counts.csv"),
-        "shape": [int(df.shape[0]), int(df.shape[1])],
-        "libsize": {str(k): float(v) for k, v in df.sum(axis=0).to_dict().items()},
-        "log1p_cpm_summary": {
-            "min": float(np.min(log1p_cpm)),
-            "median": float(np.median(log1p_cpm)),
-            "max": float(np.max(log1p_cpm)),
-        },
+        "tissue": TISSUE,
+        "diseases": _diseases(),
+        "accessions": ACCESSIONS,
+        "cell_types": CELL_TYPES,
+        "marker_panels": {"default": MARKERS_DEFAULT},
     }
 
+@app.get("/atlas/accessions")
+def accessions(disease: Optional[str] = Query(default=None)):
+    if disease is None:
+        return {"ok": True, "accessions": ACCESSIONS}
+    return {"ok": True, "accessions": [a for a in ACCESSIONS if a["disease"] == disease]}
 
-@app.post("/harmony")
-async def harmony(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-    if not run_id:
-        raise HTTPException(
-            status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
-    rid = run_id
+@app.get("/atlas/cell_types")
+def cell_types():
+    return {"ok": True, "cell_types": CELL_TYPES}
 
-    # If server restarted and caller provided file, allow rebuilding
-    if rid not in RUNS and f is not None:
-        raw = await f.read()
-        df = _read_counts_csv(raw, filename or "counts.csv")
-        _store_counts(rid, df, filename or "counts.csv")
-
-    norm_df = RUNS.get(rid, {}).get("normalized")
-    if norm_df is None:
-        # allow fallback: compute normalized from counts if present
-        df = _get_counts(rid)
-        libsize = df.sum(axis=0, skipna=True).replace(0, pd.NA)
-        cpm = df.div(libsize, axis=1) * 1e6
-        log1p_cpm = np.log1p(cpm.fillna(0).to_numpy(dtype=float))
-        norm_df = pd.DataFrame(log1p_cpm, index=df.index, columns=df.columns)
-        RUNS[rid]["normalized"] = norm_df
-
-    X = norm_df.to_numpy(dtype=float).T  # cells x genes
-
-    n_cells, n_genes = X.shape
-    n_pcs = int(min(30, max(2, n_cells - 1), max(2, n_genes - 1)))
-    pca = PCA(n_components=n_pcs, random_state=0)
-    Z = pca.fit_transform(X)
-
-    # Harmony requires batch labels; in this demo we default to one batch
-    batches = RUNS.get(rid, {}).get("batches")
-    if batches is None:
-        batches = np.zeros(n_cells, dtype=int)
-    else:
-        batches = np.asarray(batches)
-
-    applied = False
-    reason = ""
-
-    Z_corr = Z
-    if hm is None or len(np.unique(batches)) <= 1:
-        applied = False
-        reason = "harmonypy missing or n_batches<=1"
-    else:
-        try:
-            ho = hm.run_harmony(Z, pd.DataFrame({"batch": batches}), "batch")
-            Z_corr = ho.Z_corr.T
-            applied = True
-            reason = "ok"
-        except Exception as e:
-            applied = False
-            reason = f"harmony error: {e}"
-
-    RUNS[rid]["embedding"] = Z_corr
-    RUNS[rid]["embedding_name"] = "pca_harmony" if applied else "pca_fallback"
-    RUNS[rid]["harmony_meta"] = {"applied": bool(applied), "reason": reason}
-
-    return {
-        "ok": True,
-        "run_id": rid,
-        "embedding": RUNS[rid]["embedding_name"],
-        "shape": [int(Z_corr.shape[0]), int(Z_corr.shape[1])],
-        "harmony_meta": RUNS[rid]["harmony_meta"],
-    }
-
-
-@app.post("/cluster")
-async def cluster(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-    if not run_id:
-        raise HTTPException(
-            status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
-    rid = run_id
-
-    if rid not in RUNS and f is not None:
-        raw = await f.read()
-        df = _read_counts_csv(raw, filename or "counts.csv")
-        _store_counts(rid, df, filename or "counts.csv")
-
-    Z = RUNS.get(rid, {}).get("embedding")
-    if Z is None:
-        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
-
-    n_cells = int(Z.shape[0])
-    k = int(min(6, max(2, n_cells // 10))) if n_cells >= 20 else 3
-    km = KMeans(n_clusters=k, random_state=0, n_init=10)
-    labels = km.fit_predict(Z)
-
-    RUNS[rid]["clusters"] = labels
-
-    sizes = {str(i): int(np.sum(labels == i)) for i in range(k)}
-    return {
-        "ok": True,
-        "run_id": rid,
-        "k": k,
-        "cluster_sizes": sizes,
-        "note": "Clusters stored for /train and /export.",
-    }
-
-
-@app.post("/train")
-async def train(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-    if not run_id:
-        raise HTTPException(
-            status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
-    rid = run_id
-
-    # Cloud Run robustness: if file included, rebuild run on this instance
-    if f is not None:
-        raw = await f.read()
-        df = _read_counts_csv(raw, filename or "counts.csv")
-        RUNS.setdefault(rid, {})
-        _store_counts(rid, df, filename or "counts.csv")
-    else:
-        _ = _get_counts(rid)  # raises 404 if missing
-
-    try:
-        # Ensure normalized
-        norm_df = RUNS.get(rid, {}).get("normalized")
-        if norm_df is None:
-            df = _get_counts(rid)
-            libsize = df.sum(axis=0, skipna=True).replace(0, pd.NA)
-            cpm = df.div(libsize, axis=1) * 1e6
-            log1p_cpm = np.log1p(cpm.fillna(0).to_numpy(dtype=float))
-            norm_df = pd.DataFrame(log1p_cpm, index=df.index, columns=df.columns)
-            RUNS[rid]["normalized"] = norm_df
-
-        # Ensure embedding
-        Z = RUNS.get(rid, {}).get("embedding")
-        if Z is None:
-            Xg = norm_df.to_numpy(dtype=float).T  # cells x genes
-            n_cells, n_genes = Xg.shape
-            n_pcs = int(min(30, max(2, n_cells - 1), max(2, n_genes - 1)))
-            pca = PCA(n_components=n_pcs, random_state=0)
-            Z0 = pca.fit_transform(Xg)
-
-            batches = RUNS.get(rid, {}).get("batches")
-            if batches is None:
-                batches = np.zeros(n_cells, dtype=int)
-            else:
-                batches = np.asarray(batches)
-
-            applied = False
-            reason = ""
-            Z_corr = Z0
-
-            if hm is None or len(np.unique(batches)) <= 1:
-                applied = False
-                reason = "harmonypy missing or n_batches<=1"
-            else:
-                try:
-                    ho = hm.run_harmony(Z0, pd.DataFrame({"batch": batches}), "batch")
-                    Z_corr = ho.Z_corr.T
-                    applied = True
-                    reason = "ok"
-                except Exception as e:
-                    applied = False
-                    reason = f"harmony error: {e}"
-
-            RUNS[rid]["embedding"] = Z_corr
-            RUNS[rid]["embedding_name"] = "pca_harmony" if applied else "pca_fallback"
-            RUNS[rid]["harmony_meta"] = {"applied": bool(applied), "reason": reason}
-            Z = Z_corr
-
-        # Ensure clusters
-        y = RUNS.get(rid, {}).get("clusters")
-        if y is None:
-            Zm = np.asarray(Z, dtype=float)
-            n_cells = int(Zm.shape[0])
-            k = int(min(6, max(2, n_cells // 10))) if n_cells >= 20 else 3
-            km = KMeans(n_clusters=k, random_state=0, n_init=10)
-            y = km.fit_predict(Zm)
-            RUNS[rid]["clusters"] = y
-
-        X = np.asarray(Z, dtype=float)
-        y = np.asarray(y, dtype=int)
-
-        # CV folds must be <= smallest class size
-        classes, class_counts = np.unique(y, return_counts=True)
-        n_classes = int(classes.size)
-        min_class_size = int(class_counts.min()) if class_counts.size else 0
-
-        clf = LogisticRegression(max_iter=2000)
-
-        n_splits = int(min(5, min_class_size))
-        accs = []
-
-        if n_splits >= 2:
-            skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-            for tr, te in skf.split(X, y):
-                clf.fit(X[tr], y[tr])
-                pred = clf.predict(X[te])
-                accs.append(accuracy_score(y[te], pred))
-            acc_mean = float(np.mean(accs))
-            acc_std = float(np.std(accs))
-            cv_note = "ok"
-        else:
-            n_splits = 0
-            acc_mean = None
-            acc_std = None
-            cv_note = "CV skipped: min_class_size < 2"
-
-        # Fit final model
-        clf.fit(X, y)
-        RUNS[rid]["model"] = clf
-        RUNS[rid]["train_metrics"] = {
-            "cv_folds": int(n_splits),
-            "accuracy_mean": acc_mean,
-            "accuracy_std": acc_std,
-            "n_cells": int(X.shape[0]),
-            "n_features": int(X.shape[1]),
-            "n_classes": n_classes,
-            "min_class_size": int(min_class_size),
-            "cv_note": cv_note,
-            "embedding": RUNS.get(rid, {}).get("embedding_name", "pca_fallback"),
-        }
-
-        return {
-            "ok": True,
-            "run_id": rid,
-            "task": "predict_cluster_from_embedding",
-            "n_cells": int(X.shape[0]),
-            "n_features": int(X.shape[1]),
-            "n_classes": n_classes,
-            "metrics": RUNS[rid]["train_metrics"],
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"train failed: {e}")
-
-
-@app.post("/export")
-async def export(request: Request):
-    run_id, f, filename = await _parse_run_id_and_file(request)
-    if not run_id:
-        raise HTTPException(
-            status_code=422,
-            detail=[{"loc": ["body", "run_id"], "msg": "Field required", "type": "missing"}])
-    rid = run_id
-
-    # If server restarted and caller provided file, allow rebuilding counts (best effort)
-    if rid not in RUNS and f is not None:
-        raw = await f.read()
-        df = _read_counts_csv(raw, filename or "counts.csv")
-        _store_counts(rid, df, filename or "counts.csv")
-
-    if rid not in RUNS:
-        raise HTTPException(status_code=404, detail="run_id not found. Re-run /upload or /qc.")
-
-    qc_obj = RUNS[rid].get("qc")
-    norm_df: Optional[pd.DataFrame] = RUNS[rid].get("normalized")
-    Z = RUNS[rid].get("embedding")
-    y = RUNS[rid].get("clusters")
-    metrics = RUNS[rid].get("train_metrics")
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr("run_id.txt", rid)
-
-        if qc_obj is not None:
-            z.writestr("qc_summary.json", json.dumps(qc_obj, indent=2))
-
-        if norm_df is not None:
-            out = io.StringIO()
-            norm_df.to_csv(out)
-            z.writestr("normalized_log1p_cpm.csv", out.getvalue())
-
-        if Z is not None:
-            Z = np.asarray(Z)
-            emb = pd.DataFrame(Z)
-            out = io.StringIO()
-            emb.to_csv(out, index=False)
-            z.writestr("embedding.csv", out.getvalue())
-
-        if y is not None:
-            y = np.asarray(y)
-            out = io.StringIO()
-            pd.DataFrame({"cluster": y}).to_csv(out, index=False)
-            z.writestr("clusters.csv", out.getvalue())
-
-        if metrics is not None:
-            z.writestr("train_metrics.json", json.dumps(metrics, indent=2))
-
-    buf.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="rnaseq_export.zip"'}
-    return StreamingResponse(buf, media_type="application/zip", headers=headers)
+@app.get("/atlas/markers")
+def markers(panel: str = Query(default="default")):
+    if panel != "default":
+        return {"ok": False, "error": "unknown panel", "available": ["default"]}
+    return {"ok": True, "panel": panel, "genes": MARKERS_DEFAULT}
