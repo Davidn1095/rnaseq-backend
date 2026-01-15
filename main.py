@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Query
@@ -44,6 +45,56 @@ MARKERS_DEFAULT = [
 
 ARTIFACTS_PATH = Path(__file__).resolve().parent / "data" / "atlas_artifacts.json"
 
+logger = logging.getLogger(__name__)
+
+def _placeholder_artifacts() -> Dict[str, Any]:
+    return {
+        "umap": [],
+        "dotplot": {
+            "groupings": {
+                "cell_type": {
+                    "groups": [],
+                    "genes": {
+                        "IL7R": {"avg": [], "pct": []},
+                    },
+                },
+            },
+        },
+        "violin": {
+            "groupings": {
+                "cell_type": {
+                    "genes": {
+                        "IL7R": {
+                            "bins": [],
+                            "counts": {"CD4 T cells": []},
+                            "quantiles": {"CD4 T cells": []},
+                        },
+                    },
+                },
+            },
+        },
+        "de": {
+            "contrasts": {
+                "Placeholder_vs_Healthy": {
+                    "cell_types": {"CD4 T cells": []},
+                },
+            },
+        },
+        "modulescore": {
+            "modules": {
+                "IFN": {
+                    "groupings": {
+                        "cell_type": {
+                            "bins": [],
+                            "counts": {"CD4 T cells": []},
+                        },
+                    },
+                    "feature_plot": {"cell_ids": [], "values": []},
+                },
+            },
+        },
+    }
+
 def _diseases() -> List[str]:
     ds = sorted({a["disease"] for a in ACCESSIONS})
     # ensure Healthy first if present
@@ -51,6 +102,13 @@ def _diseases() -> List[str]:
 
 @app.on_event("startup")
 def load_artifacts() -> None:
+    if not ARTIFACTS_PATH.exists():
+        logger.warning(
+            "Artifacts file %s is missing; loading placeholder artifacts instead.",
+            ARTIFACTS_PATH,
+        )
+        app.state.artifacts = _placeholder_artifacts()
+        return
     with ARTIFACTS_PATH.open("r", encoding="utf-8") as handle:
         app.state.artifacts = json.load(handle)
 
