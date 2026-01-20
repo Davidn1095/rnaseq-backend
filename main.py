@@ -96,6 +96,15 @@ def _placeholder_artifacts() -> Dict[str, Any]:
         },
     }
 
+def _empty_artifacts() -> Dict[str, Any]:
+    return {
+        "umap": [],
+        "dotplot": {"groupings": {}},
+        "violin": {"groupings": {}},
+        "de": {"contrasts": {}},
+        "modulescore": {"modules": {}},
+    }
+
 def _merge_artifacts(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
     if not incoming:
         return base
@@ -138,7 +147,7 @@ def load_artifacts() -> None:
     data_dir = ARTIFACTS_PATH.parent
     parts = sorted(data_dir.glob(ARTIFACTS_GLOB))
     if parts:
-        merged = _placeholder_artifacts()
+        merged = _empty_artifacts()
         for path in parts:
             with path.open("r", encoding="utf-8") as handle:
                 merged = _merge_artifacts(merged, json.load(handle))
