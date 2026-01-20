@@ -44,6 +44,7 @@ MARKERS_DEFAULT = [
 ]
 
 ARTIFACTS_PATH = Path(__file__).resolve().parent / "data" / "atlas_artifacts.json"
+ARTIFACTS_GLOB = "atlas_artifacts_*.json"
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,27 @@ def _placeholder_artifacts() -> Dict[str, Any]:
         },
     }
 
+def _merge_artifacts(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    if not incoming:
+        return base
+
+    if incoming.get("umap"):
+        base["umap"].extend(incoming.get("umap", []))
+
+    if incoming.get("dotplot", {}).get("groupings"):
+        base["dotplot"]["groupings"].update(incoming["dotplot"]["groupings"])
+
+    if incoming.get("violin", {}).get("groupings"):
+        base["violin"]["groupings"].update(incoming["violin"]["groupings"])
+
+    if incoming.get("modulescore", {}).get("modules"):
+        base["modulescore"]["modules"].update(incoming["modulescore"]["modules"])
+
+    if incoming.get("de", {}).get("contrasts"):
+        base["de"]["contrasts"].update(incoming["de"]["contrasts"])
+
+    return base
+
 def _diseases() -> List[str]:
     ds = sorted({a["disease"] for a in ACCESSIONS})
     # ensure Healthy first if present
@@ -113,15 +135,27 @@ def _cell_types() -> List[str]:
 
 @app.on_event("startup")
 def load_artifacts() -> None:
-    if not ARTIFACTS_PATH.exists():
+    if ARTIFACTS_PATH.exists():
+        with ARTIFACTS_PATH.open("r", encoding="utf-8") as handle:
+            app.state.artifacts = json.load(handle)
+        return
+
+    data_dir = ARTIFACTS_PATH.parent
+    parts = sorted(data_dir.glob(ARTIFACTS_GLOB))
+    if not parts:
         logger.warning(
-            "Artifacts file %s is missing; loading placeholder artifacts instead.",
+            "Artifacts file %s is missing and no %s found; loading placeholder artifacts instead.",
             ARTIFACTS_PATH,
+            ARTIFACTS_GLOB,
         )
         app.state.artifacts = _placeholder_artifacts()
         return
-    with ARTIFACTS_PATH.open("r", encoding="utf-8") as handle:
-        app.state.artifacts = json.load(handle)
+
+    merged = _placeholder_artifacts()
+    for path in parts:
+        with path.open("r", encoding="utf-8") as handle:
+            merged = _merge_artifacts(merged, json.load(handle))
+    app.state.artifacts = merged
 
 def _get_artifacts() -> Dict[str, Any]:
     return app.state.artifacts
