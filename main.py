@@ -29,13 +29,34 @@ ACCESSIONS: List[Dict[str, Any]] = [
 ]
 
 CELL_TYPES = [
-    "CD4 T cells",
-    "CD8 T cells",
-    "B cells",
-    "NK cells",
-    "Monocytes",
-    "Dendritic cells",
-    "Plasma cells",
+    "Central memory CD8 T cells",
+    "Classical monocytes",
+    "Effector memory CD8 T cells",
+    "Exhausted B cells",
+    "Follicular helper T cells",
+    "Intermediate monocytes",
+    "Low density neutrophils",
+    "MAIT cells",
+    "Myeloid dendritic cells",
+    "Naive B cells",
+    "Naive CD4 T cells",
+    "Naive CD8 T cells",
+    "Natural killer cells",
+    "Non Vd2 gd T cells",
+    "Non classical monocytes",
+    "Non switched memory B cells",
+    "Plasmablasts",
+    "Plasmacytoid dendritic cells",
+    "Progenitor cells",
+    "Switched memory B cells",
+    "T regulatory cells",
+    "Terminal effector CD4 T cells",
+    "Terminal effector CD8 T cells",
+    "Th1 Th17 cells",
+    "Th1 cells",
+    "Th17 cells",
+    "Th2 cells",
+    "Vd2 gd T cells",
 ]
 
 MARKERS_DEFAULT = [
@@ -137,14 +158,15 @@ def _diseases() -> List[str]:
     return ["Healthy"] + [d for d in ds if d != "Healthy"] if "Healthy" in ds else ds
 
 def _cell_types() -> List[str]:
-    artifacts = _get_artifacts()
-    contrasts = artifacts.get("de", {}).get("contrasts", {})
-    cell_types = set()
-    for payload in contrasts.values():
-        for ct in payload.get("cell_types", {}).keys():
-            cell_types.add(ct)
-    if cell_types:
-        return sorted(cell_types)
+    artifacts = getattr(app.state, "artifacts", None)
+    if artifacts:
+        contrasts = artifacts.get("de", {}).get("contrasts", {})
+        cell_types = set()
+        for payload in contrasts.values():
+            for ct in payload.get("cell_types", {}).keys():
+                cell_types.add(ct)
+        if cell_types:
+            return sorted(cell_types)
     return CELL_TYPES
 
 def _load_artifacts() -> Dict[str, Any]:
