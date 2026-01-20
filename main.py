@@ -135,27 +135,27 @@ def _cell_types() -> List[str]:
 
 @app.on_event("startup")
 def load_artifacts() -> None:
+    data_dir = ARTIFACTS_PATH.parent
+    parts = sorted(data_dir.glob(ARTIFACTS_GLOB))
+    if parts:
+        merged = _placeholder_artifacts()
+        for path in parts:
+            with path.open("r", encoding="utf-8") as handle:
+                merged = _merge_artifacts(merged, json.load(handle))
+        app.state.artifacts = merged
+        return
+
     if ARTIFACTS_PATH.exists():
         with ARTIFACTS_PATH.open("r", encoding="utf-8") as handle:
             app.state.artifacts = json.load(handle)
         return
 
-    data_dir = ARTIFACTS_PATH.parent
-    parts = sorted(data_dir.glob(ARTIFACTS_GLOB))
-    if not parts:
-        logger.warning(
-            "Artifacts file %s is missing and no %s found; loading placeholder artifacts instead.",
-            ARTIFACTS_PATH,
-            ARTIFACTS_GLOB,
-        )
-        app.state.artifacts = _placeholder_artifacts()
-        return
-
-    merged = _placeholder_artifacts()
-    for path in parts:
-        with path.open("r", encoding="utf-8") as handle:
-            merged = _merge_artifacts(merged, json.load(handle))
-    app.state.artifacts = merged
+    logger.warning(
+        "Artifacts file %s is missing and no %s found; loading placeholder artifacts instead.",
+        ARTIFACTS_PATH,
+        ARTIFACTS_GLOB,
+    )
+    app.state.artifacts = _placeholder_artifacts()
 
 def _get_artifacts() -> Dict[str, Any]:
     return app.state.artifacts
