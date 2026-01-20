@@ -181,6 +181,34 @@ def _get_artifacts() -> Dict[str, Any]:
 def _normalize_label(value: str) -> str:
     return value.strip().lower()
 
+def _resolve_disease_filter(disease: str, rows: List[Dict[str, Any]]) -> str:
+    if not disease or not rows:
+        return disease
+    available = sorted({row.get("disease") for row in rows if row.get("disease")})
+    if disease in available:
+        return disease
+    normalized = {_normalize_label(value): value for value in available}
+    disease_norm = _normalize_label(disease)
+    if disease_norm in normalized:
+        return normalized[disease_norm]
+    synonyms = {
+        "ra": "rheumatoid arthritis",
+        "rheumatoid arthritis": "rheumatoid arthritis",
+        "sjs": "sjs",
+        "sle": "sle",
+        "systemic lupus erythematosus": "systemic lupus erythematosus",
+        "healthy": "normal",
+        "normal": "normal",
+    }
+    if disease_norm in synonyms:
+        candidate = synonyms[disease_norm]
+        if candidate in normalized:
+            return normalized[candidate]
+    for key, value in normalized.items():
+        if disease_norm in key:
+            return value
+    return disease
+
 def _resolve_contrast(disease: str, contrasts: Dict[str, Any]) -> Optional[str]:
     if disease in contrasts:
         return disease
@@ -268,8 +296,10 @@ def atlas_umap(
 ):
     artifacts = _get_artifacts()
     rows = artifacts["umap"]
+    resolved_disease = None
     if disease is not None:
-        rows = [row for row in rows if row.get("disease") == disease]
+        resolved_disease = _resolve_disease_filter(disease, rows)
+        rows = [row for row in rows if row.get("disease") == resolved_disease]
     if cell_type is not None:
         rows = [row for row in rows if row.get("cell_type") == cell_type]
     if rows and color_key not in rows[0]:
@@ -277,7 +307,7 @@ def atlas_umap(
 
     response = {
         "ok": True,
-        "filters": {"disease": disease, "cell_type": cell_type},
+        "filters": {"disease": disease, "resolved_disease": resolved_disease, "cell_type": cell_type},
         "color_key": color_key,
         "x": [row["x"] for row in rows],
         "y": [row["y"] for row in rows],
