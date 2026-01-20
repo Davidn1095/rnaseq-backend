@@ -101,6 +101,7 @@ def _empty_artifacts() -> Dict[str, Any]:
         "umap": [],
         "dotplot": {"groupings": {}},
         "violin": {"groupings": {}},
+        "composition": {"groupings": {}},
         "de": {"contrasts": {}},
         "modulescore": {"modules": {}},
     }
@@ -120,6 +121,10 @@ def _merge_artifacts(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str
 
     if incoming.get("modulescore", {}).get("modules"):
         base["modulescore"]["modules"].update(incoming["modulescore"]["modules"])
+
+    if incoming.get("composition", {}).get("groupings"):
+        base.setdefault("composition", {"groupings": {}})
+        base["composition"]["groupings"].update(incoming["composition"]["groupings"])
 
     if incoming.get("de", {}).get("contrasts"):
         base["de"]["contrasts"].update(incoming["de"]["contrasts"])
@@ -341,6 +346,23 @@ def atlas_violin(
         "kind": kind,
         "groups": groups,
         "quantiles": quantiles,
+    }
+
+@app.get("/atlas/composition")
+def atlas_composition(
+    group_by: str = Query(default="disease"),
+):
+    artifacts = _get_artifacts()
+    groupings = artifacts.get("composition", {}).get("groupings", {})
+    if group_by not in groupings:
+        return {"ok": False, "error": "unknown group_by", "available": list(groupings.keys())}
+    payload = groupings[group_by]
+    return {
+        "ok": True,
+        "group_by": group_by,
+        "groups": payload.get("groups", []),
+        "cell_types": payload.get("cell_types", []),
+        "counts": payload.get("counts", []),
     }
 
 @app.get("/atlas/de")
