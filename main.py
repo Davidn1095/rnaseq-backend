@@ -315,6 +315,7 @@ def atlas_umap(
     cell_type: Optional[str] = Query(default=None),
     color_key: str = Query(default="cell_type"),
     value_key: Optional[str] = Query(default=None),
+    max_points: Optional[int] = Query(default=None, ge=1000, le=100000),
 ):
     artifacts = _get_artifacts()
     rows = artifacts["umap"]
@@ -327,9 +328,18 @@ def atlas_umap(
     if rows and color_key not in rows[0]:
         return {"ok": False, "error": "unknown color_key", "available": ["cell_type", "disease", "module_score"]}
 
+    if max_points is not None and len(rows) > max_points:
+        step = max(1, len(rows) // max_points)
+        rows = rows[::step]
+
     response = {
         "ok": True,
-        "filters": {"disease": disease, "resolved_disease": resolved_disease, "cell_type": cell_type},
+        "filters": {
+            "disease": disease,
+            "resolved_disease": resolved_disease,
+            "cell_type": cell_type,
+            "max_points": max_points,
+        },
         "color_key": color_key,
         "x": [row["x"] for row in rows],
         "y": [row["y"] for row in rows],
