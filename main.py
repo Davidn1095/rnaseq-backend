@@ -100,6 +100,17 @@ def _diseases() -> List[str]:
     # ensure Healthy first if present
     return ["Healthy"] + [d for d in ds if d != "Healthy"] if "Healthy" in ds else ds
 
+def _cell_types() -> List[str]:
+    artifacts = _get_artifacts()
+    contrasts = artifacts.get("de", {}).get("contrasts", {})
+    cell_types = set()
+    for payload in contrasts.values():
+        for ct in payload.get("cell_types", {}).keys():
+            cell_types.add(ct)
+    if cell_types:
+        return sorted(cell_types)
+    return CELL_TYPES
+
 @app.on_event("startup")
 def load_artifacts() -> None:
     if not ARTIFACTS_PATH.exists():
@@ -115,6 +126,56 @@ def load_artifacts() -> None:
 def _get_artifacts() -> Dict[str, Any]:
     return app.state.artifacts
 
+def _normalize_label(value: str) -> str:
+    return value.strip().lower()
+
+def _resolve_contrast(disease: str, contrasts: Dict[str, Any]) -> Optional[str]:
+    if disease in contrasts:
+        return disease
+    normalized = { _normalize_label(k): k for k in contrasts.keys() }
+    disease_norm = _normalize_label(disease)
+    if disease_norm in normalized:
+        return normalized[disease_norm]
+
+    candidates = [
+        f"{disease}_vs_Healthy",
+        f"{disease} vs Healthy",
+        f"{disease}_vs_Control",
+        f"{disease} vs Control",
+        f"{disease}_vs_Normal",
+        f"{disease} vs Normal",
+    ]
+    for candidate in candidates:
+        if candidate in contrasts:
+            return candidate
+        cand_norm = _normalize_label(candidate)
+        if cand_norm in normalized:
+            return normalized[cand_norm]
+    return None
+
+def _de_payload(contrasts: Dict[str, Any], contrast: str, cell_type: str, limit: int, offset: int, top_n: int):
+    if contrast not in contrasts:
+        return {"ok": False, "error": "unknown contrast", "available": list(contrasts.keys())}
+    cell_types = contrasts[contrast]["cell_types"]
+    if cell_type not in cell_types:
+        return {"ok": False, "error": "unknown cell_type", "available": list(cell_types.keys())}
+    rows = cell_types[cell_type]
+    total = len(rows)
+    paged = rows[offset:offset + limit]
+    top_up = sorted(rows, key=lambda r: r["logfc"], reverse=True)[:top_n]
+    top_down = sorted(rows, key=lambda r: r["logfc"])[:top_n]
+    return {
+        "ok": True,
+        "contrast": contrast,
+        "cell_type": cell_type,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "rows": paged,
+        "top_up": top_up,
+        "top_down": top_down,
+    }
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -126,7 +187,7 @@ def manifest():
         "tissue": TISSUE,
         "diseases": _diseases(),
         "accessions": ACCESSIONS,
-        "cell_types": CELL_TYPES,
+        "cell_types": _cell_types(),
         "marker_panels": {"default": MARKERS_DEFAULT},
     }
 
@@ -138,7 +199,7 @@ def accessions(disease: Optional[str] = Query(default=None)):
 
 @app.get("/atlas/cell_types")
 def cell_types():
-    return {"ok": True, "cell_types": CELL_TYPES}
+    return {"ok": True, "cell_types": _cell_types()}
 
 @app.get("/atlas/markers")
 def markers(panel: str = Query(default="default")):
@@ -249,27 +310,22 @@ def atlas_de(
 ):
     artifacts = _get_artifacts()
     contrasts = artifacts["de"]["contrasts"]
-    if contrast not in contrasts:
-        return {"ok": False, "error": "unknown contrast", "available": list(contrasts.keys())}
-    cell_types = contrasts[contrast]["cell_types"]
-    if cell_type not in cell_types:
-        return {"ok": False, "error": "unknown cell_type", "available": list(cell_types.keys())}
-    rows = cell_types[cell_type]
-    total = len(rows)
-    paged = rows[offset:offset + limit]
-    top_up = sorted(rows, key=lambda r: r["logfc"], reverse=True)[:top_n]
-    top_down = sorted(rows, key=lambda r: r["logfc"])[:top_n]
-    return {
-        "ok": True,
-        "contrast": contrast,
-        "cell_type": cell_type,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "rows": paged,
-        "top_up": top_up,
-        "top_down": top_down,
-    }
+    return _de_payload(contrasts, contrast, cell_type, limit, offset, top_n)
+
+@app.get("/atlas/de_by_disease")
+def atlas_de_by_disease(
+    disease: str = Query(...),
+    cell_type: str = Query(...),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    top_n: int = Query(default=5, ge=1, le=50),
+):
+    artifacts = _get_artifacts()
+    contrasts = artifacts["de"]["contrasts"]
+    contrast = _resolve_contrast(disease, contrasts)
+    if contrast is None:
+        return {"ok": False, "error": "unknown disease", "available": list(contrasts.keys())}
+    return _de_payload(contrasts, contrast, cell_type, limit, offset, top_n)
 
 @app.get("/atlas/modulescore")
 def atlas_modulescore(
